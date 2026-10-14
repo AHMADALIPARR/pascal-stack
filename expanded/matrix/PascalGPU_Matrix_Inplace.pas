@@ -84,6 +84,7 @@ type
     Data    : PFloat32;
     OwnsData: Boolean;
     Stride  : TUInt32;  { row stride in elements }
+    Capacity: TUInt64;  { FIX-1: elements backing Data (set by AllocMatrix); 0 => access rejected }
   end;
   PMatrix = ^TMatrix;
 
@@ -103,6 +104,7 @@ type
     Strides      : array[0..7] of TUInt32;
     Data         : PFloat32;
     TotalElements: TUInt64;
+    Capacity     : TUInt64;  { FIX-2: elements backing Data; set by every allocating routine }
   end;
   PTensor = ^TTensor;
 
@@ -654,72 +656,21 @@ function MatrixSubsystemTest: TResult;
 { handcrafted 20k into 200k while preserving invariants. }
 
 function FreeMatrix_Inplace_Variant01(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted FreeMatrix: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.FreeMatrix
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted FreeMatrix when available — no synthetic logic
-end;
 
 function MatrixZero_Inplace_Variant02(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted MatrixZero: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.MatrixZero
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted MatrixZero when available — no synthetic logic
-end;
 
 function MatrixIdentity_Inplace_Variant03(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted MatrixIdentity: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.MatrixIdentity
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted MatrixIdentity when available — no synthetic logic
-end;
 
 function FreeTensor_Inplace_Variant04(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted FreeTensor: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.FreeTensor
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted FreeTensor when available — no synthetic logic
-end;
 
 function TensorPrint_Inplace_Variant05(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted TensorPrint: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.TensorPrint
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted TensorPrint when available — no synthetic logic
-end;
 
 function MultiHeadAttentionFree_Inplace_Variant06(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted MultiHeadAttentionFree: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.MultiHeadAttentionFree
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted MultiHeadAttentionFree when available — no synthetic logic
-end;
 
 function TensorValidate_Inplace_Variant07(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Inplace specialization of handcrafted TensorValidate: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Matrix.TensorValidate
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted TensorValidate when available — no synthetic logic
-end;
 
 { ======== Inplace INVARIANT CHECKS — mirrored from handcrafted ======== }
 procedure PascalGPU_Matrix_Inplace_VerifyInvariants_Inplace;
-var
-  I: Integer;
-begin
-  for I := 0 to 7 do
-  begin
-    // Verify PascalGPU_Matrix invariants under Inplace semantics
-    if I = 0 then Continue;
-  end;
-end;
 
 implementation
 function FreeMatrix_Inplace_Variant01(const Original: Pointer; Stride: TUInt32): Boolean;
@@ -768,6 +719,26 @@ end;
   MATRIX IMPLEMENTATIONS
   ============================================================ }
 
+{ === FIX-1: layout guard — Stride >= Cols and (Rows-1)*Stride+Cols <= Capacity.
+  Evaluated once per call; hot loops below never re-check per element. === }
+function MatrixLayoutOK(const M: TMatrix): Boolean; inline;
+begin
+  Result := (M.Data <> nil) and (M.Rows > 0) and (M.Cols > 0) and (M.Stride >= M.Cols)
+    and ((TUInt64(M.Rows) - 1) * M.Stride + M.Cols <= M.Capacity);
+end;
+
+{ === FIX-3: byte-range overlap of two (layout-valid) matrices === }
+function MatrixRegionOverlap(const X, Y: TMatrix): Boolean;
+var
+  xs, xe, ys, ye: PtrUInt;
+begin
+  xs := PtrUInt(X.Data);
+  xe := xs + PtrUInt(((TUInt64(X.Rows) - 1) * X.Stride + X.Cols) * SizeOf(TFloat32));
+  ys := PtrUInt(Y.Data);
+  ye := ys + PtrUInt(((TUInt64(Y.Rows) - 1) * Y.Stride + Y.Cols) * SizeOf(TFloat32));
+  Result := (xs < ye) and (ys < xe);
+end;
+
 { -----------------------------------------------------------------------
   SOVEREIGN NODE KEY : PASCAL-STACK-006-BLK-352
   Block              : AllocMatrix implementation
@@ -798,6 +769,7 @@ begin
   M.Cols     := Cols;
   M.Stride   := Cols;
   M.OwnsData := True;
+  M.Capacity := TUInt64(Rows) * Cols;  { FIX-1 }
   FillChar(M.Data^, ByteCount, 0);
   Result := PGPU_SUCCESS;
 end;
@@ -821,6 +793,7 @@ begin
   M.Rows     := 0;
   M.Cols     := 0;
   M.Stride   := 0;
+  M.Capacity := 0;
   M.OwnsData := False;
   Result := PGPU_SUCCESS;
 end;
@@ -838,7 +811,7 @@ function MatrixAt(const M: TMatrix; Row, Col: TUInt32): TFloat32;
 var
   Ptr: PFloat32;
 begin
-  if (M.Data = nil) or (Row >= M.Rows) or (Col >= M.Cols) then
+  if (Row >= M.Rows) or (Col >= M.Cols) or not MatrixLayoutOK(M) then  { FIX-1 }
   begin
     Result := 0.0;
     Exit;
@@ -861,7 +834,7 @@ function MatrixSet(var M: TMatrix; Row, Col: TUInt32; Value: TFloat32): TResult;
 var
   Ptr: PFloat32;
 begin
-  if M.Data = nil then
+  if not MatrixLayoutOK(M) then  { FIX-1 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -891,7 +864,7 @@ var
   i, j: TUInt32;
   Ptr: PFloat32;
 begin
-  if M.Data = nil then
+  if not MatrixLayoutOK(M) then  { FIX-1 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -924,7 +897,7 @@ var
   RowPtr: PFloat32;
   RowBytes: TUInt64;
 begin
-  if M.Data = nil then
+  if not MatrixLayoutOK(M) then  { FIX-1 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -991,7 +964,7 @@ var
   RowBytes: TUInt64;
 begin
   FillChar(Dst, SizeOf(TMatrix), 0);
-  if Src.Data = nil then
+  if not MatrixLayoutOK(Src) then  { FIX-1 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -1170,32 +1143,47 @@ var
   R: TResult;
   i, j, k: TUInt32;
   Acc: TFloat32;
+  AA, BB: TMatrix;
+  PRowA, PB, PC: PFloat32;
 begin
+  { FIX-3: snapshot inputs before FillChar(C) — C may be the same variable as A or B }
+  AA := A;
+  BB := B;
   FillChar(C, SizeOf(TMatrix), 0);
-  if (A.Data = nil) or (B.Data = nil) then
+  { FIX-1: layout guards once, outside the loops }
+  if not (MatrixLayoutOK(AA) and MatrixLayoutOK(BB)) then
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
   end;
-  if A.Cols <> B.Rows then
+  if AA.Cols <> BB.Rows then
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
   end;
-  R := AllocMatrix(C, A.Rows, B.Cols);
+  R := AllocMatrix(C, AA.Rows, BB.Cols);
   if R <> PGPU_SUCCESS then
   begin
     Result := R;
     Exit;
   end;
-  for i := 0 to A.Rows - 1 do
-    for j := 0 to B.Cols - 1 do
+  { C is freshly allocated, so it cannot overlap AA/BB }
+  for i := 0 to AA.Rows - 1 do
+  begin
+    PRowA := AA.Data + TUInt64(i) * AA.Stride;
+    PC    := C.Data + TUInt64(i) * C.Stride;
+    for j := 0 to BB.Cols - 1 do
     begin
       Acc := 0.0;
-      for k := 0 to A.Cols - 1 do
-        Acc := Acc + MatrixAt(A, i, k) * MatrixAt(B, k, j);
-      MatrixSet(C, i, j, Acc);
+      PB  := BB.Data + j;
+      for k := 0 to AA.Cols - 1 do
+      begin
+        Acc := Acc + PRowA[k] * PB^;
+        Inc(PB, BB.Stride);
+      end;
+      PC[j] := Acc;
     end;
+  end;
   Result := PGPU_SUCCESS;
 end;
 
@@ -1278,9 +1266,14 @@ end;
 function PascalGEMM(Alpha: TFloat32; const A, B: TMatrix; Beta: TFloat32; var C: TMatrix): TResult;
 var
   i, j, k: TUInt32;
-  Acc, Old: TFloat32;
+  Acc: TFloat32;
+  R: TResult;
+  AA, BB, TA, TB: TMatrix;
+  FreeTA, FreeTB: Boolean;
+  PRowA, PB, PC: PFloat32;
 begin
-  if (A.Data = nil) or (B.Data = nil) or (C.Data = nil) then
+  { FIX-1: layout guards once, outside the loops }
+  if not (MatrixLayoutOK(A) and MatrixLayoutOK(B) and MatrixLayoutOK(C)) then
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -1290,15 +1283,60 @@ begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
   end;
-  for i := 0 to A.Rows - 1 do
-    for j := 0 to B.Cols - 1 do
+  { FIX-3 alias guard: C(i,j) is written while later steps still read A and B.
+    Any input whose byte range overlaps C is first copied to a fresh temporary
+    (MatrixCopy -> AllocMatrix -> GetMem), so the loop only reads memory it never writes. }
+  AA := A;
+  BB := B;
+  FreeTA := False;
+  FreeTB := False;
+  if MatrixRegionOverlap(C, A) then
+  begin
+    R := MatrixCopy(A, TA);
+    if R <> PGPU_SUCCESS then
+    begin
+      Result := R;
+      Exit;
+    end;
+    AA := TA;
+    FreeTA := True;
+  end;
+  if MatrixRegionOverlap(C, B) then
+  begin
+    if FreeTA and (B.Data = A.Data) and (B.Stride = A.Stride)
+       and (B.Rows = A.Rows) and (B.Cols = A.Cols) then
+      BB := TA
+    else
+    begin
+      R := MatrixCopy(B, TB);
+      if R <> PGPU_SUCCESS then
+      begin
+        if FreeTA then FreeMatrix(TA);
+        Result := R;
+        Exit;
+      end;
+      BB := TB;
+      FreeTB := True;
+    end;
+  end;
+  for i := 0 to AA.Rows - 1 do
+  begin
+    PRowA := AA.Data + TUInt64(i) * AA.Stride;
+    PC    := C.Data + TUInt64(i) * C.Stride;
+    for j := 0 to BB.Cols - 1 do
     begin
       Acc := 0.0;
-      for k := 0 to A.Cols - 1 do
-        Acc := Acc + MatrixAt(A, i, k) * MatrixAt(B, k, j);
-      Old := MatrixAt(C, i, j);
-      MatrixSet(C, i, j, Alpha * Acc + Beta * Old);
+      PB  := BB.Data + j;
+      for k := 0 to AA.Cols - 1 do
+      begin
+        Acc := Acc + PRowA[k] * PB^;
+        Inc(PB, BB.Stride);
+      end;
+      PC[j] := Alpha * Acc + Beta * PC[j];
     end;
+  end;
+  if FreeTA then FreeMatrix(TA);
+  if FreeTB then FreeMatrix(TB);
   Result := PGPU_SUCCESS;
 end;
 
@@ -1758,6 +1796,7 @@ begin
     Exit;
   end;
   FillChar(T.Data^, ByteCount, 0);
+  T.Capacity := Total;  { FIX-2 }
   Result := PGPU_SUCCESS;
 end;
 
@@ -1917,6 +1956,7 @@ begin
     Exit;
   end;
   Move(A.Data^, B.Data^, ByteCount);
+  B.Capacity := NewTotal;  { FIX-2 }
   Result := PGPU_SUCCESS;
 end;
 
@@ -1988,6 +2028,7 @@ begin
     Result := PGPU_ERR_OUT_OF_MEMORY;
     Exit;
   end;
+  B.Capacity := B.TotalElements;  { FIX-2 }
   { Copy elements }
   FillChar(DstIdx, SizeOf(DstIdx), 0);
   for e := 0 to ElemCount - 1 do
@@ -2065,6 +2106,7 @@ begin
     Result := PGPU_ERR_OUT_OF_MEMORY;
     Exit;
   end;
+  C.Capacity := C.TotalElements;  { FIX-2 }
   PA    := A.Data;
   PBPtr := B.Data;
   PCPtr := C.Data;
@@ -2111,6 +2153,7 @@ begin
     Result := PGPU_ERR_OUT_OF_MEMORY;
     Exit;
   end;
+  C.Capacity := C.TotalElements;  { FIX-2 }
   PA    := A.Data;
   PBPtr := B.Data;
   PCPtr := C.Data;
@@ -2150,6 +2193,18 @@ begin
   if (A.NDim <> 3) or (B.NDim <> 3) then
   begin
     Result := PGPU_ERR_INVALID_PARAM;
+    Exit;
+  end;
+  { FIX-2: shape/total/row-major strides validated (non-contiguous rejected) and
+    TotalElements must fit the backing storage — checked once, before any loop }
+  if (TensorValidate(A) <> PGPU_SUCCESS) or (TensorValidate(B) <> PGPU_SUCCESS) then
+  begin
+    Result := PGPU_ERR_INVALID_PARAM;
+    Exit;
+  end;
+  if (A.TotalElements > A.Capacity) or (B.TotalElements > B.Capacity) then
+  begin
+    Result := PGPU_ERR_BOUNDS;
     Exit;
   end;
   Batch := A.Shape[0];
@@ -2844,6 +2899,7 @@ begin
     Result := PGPU_ERR_OUT_OF_MEMORY;
     Exit;
   end;
+  Dst.Capacity := Src.TotalElements;  { FIX-2 }
   Move(Src.Data^, Dst.Data^, ByteCount);
   Result := PGPU_SUCCESS;
 end;

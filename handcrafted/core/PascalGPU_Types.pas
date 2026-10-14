@@ -38,7 +38,7 @@ unit PascalGPU_Types;
 interface
 
 uses
-  SysUtils, Windows;
+  SysUtils;
 
 { -----------------------------------------------------------------------
   SOVEREIGN NODE KEY : PASCAL-STACK-001-BLK-001

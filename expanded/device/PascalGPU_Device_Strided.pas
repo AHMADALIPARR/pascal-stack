@@ -146,6 +146,7 @@ type
     Kind:     TMemoryKind;   { Memory kind (mkDevice for simulated allocs)      }
     DeviceID: TInt32;        { Owning device identifier                         }
     IsValid:  Boolean;       { False after FreeMemory                           }
+    Generation: TUInt64;     { FIX-4: single-owner token, must match live registry }
   end;
   PDeviceMemory = ^TDeviceMemory;
 
@@ -198,6 +199,7 @@ type
     FInitialized:    Boolean;
     FAllocatedBytes: TUInt64;
     FAllocCount:     TInt32;
+    FPending:        Boolean;  { FIX-5: H2D/D2D writes not yet fenced by Synchronize }
   public
     constructor Create(ADeviceID: TInt32);
     { IDeviceBackend }
@@ -729,111 +731,31 @@ var
 { handcrafted 20k into 200k while preserving invariants. }
 
 function GetProperties_Strided_Variant01(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted GetProperties: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.GetProperties
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted GetProperties when available — no synthetic logic
-end;
 
 function FreeMemory_Strided_Variant02(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted FreeMemory: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.FreeMemory
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted FreeMemory when available — no synthetic logic
-end;
 
 function SupportsFeature_Strided_Variant03(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted SupportsFeature: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.SupportsFeature
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted SupportsFeature when available — no synthetic logic
-end;
 
 function DestroyDevice_Strided_Variant04(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DestroyDevice: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DestroyDevice
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DestroyDevice when available — no synthetic logic
-end;
 
 function DeviceInitialize_Strided_Variant05(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DeviceInitialize: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DeviceInitialize
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DeviceInitialize when available — no synthetic logic
-end;
 
 function DeviceFinalize_Strided_Variant06(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DeviceFinalize: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DeviceFinalize
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DeviceFinalize when available — no synthetic logic
-end;
 
 function DeviceSynchronize_Strided_Variant07(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DeviceSynchronize: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DeviceSynchronize
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DeviceSynchronize when available — no synthetic logic
-end;
 
 function DeviceGetState_Strided_Variant08(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DeviceGetState: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DeviceGetState
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DeviceGetState when available — no synthetic logic
-end;
 
 function EnumerateDevices_Strided_Variant09(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted EnumerateDevices: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.EnumerateDevices
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted EnumerateDevices when available — no synthetic logic
-end;
 
 function DeviceCount_Strided_Variant10(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DeviceCount: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DeviceCount
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DeviceCount when available — no synthetic logic
-end;
 
 procedure SetDefaultDevice_Strided_Variant11(var State: Pointer; Count: TUInt32); inline;
-begin
-  // Strided specialization of handcrafted SetDefaultDevice
-  if (State = nil) or (Count = 0) then Exit;
-  // Preserves handcrafted invariant from PascalGPU_Device.SetDefaultDevice
-end;
 
 function DestroyDeviceContext_Strided_Variant12(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Strided specialization of handcrafted DestroyDeviceContext: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Device.DestroyDeviceContext
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted DestroyDeviceContext when available — no synthetic logic
-end;
 
 { ======== Strided INVARIANT CHECKS — mirrored from handcrafted ======== }
 procedure PascalGPU_Device_Strided_VerifyInvariants_Strided;
-var
-  I: Integer;
-begin
-  for I := 0 to 7 do
-  begin
-    // Verify PascalGPU_Device invariants under Strided semantics
-    if I = 0 then Continue;
-  end;
-end;
 
 implementation
 function GetProperties_Strided_Variant01(const Original: Pointer; Stride: TUInt32): Boolean;
@@ -908,6 +830,54 @@ var
   GCurrentContext:    TDeviceContext;
   GHasCurrentContext: Boolean;
 
+{ === FIX-4: live-allocation registry. Every successful AllocMemory gets a fresh
+  Generation and is registered as (Ptr, Generation). Free/Memcpy/Fill accept a
+  TDeviceMemory only if its (Ptr, Generation) is live, so a stale record copy is
+  rejected even if GetMem later reuses the address. Single-threaded, like the
+  rest of the simulator. === }
+type
+  TLiveAlloc = record
+    Ptr: Pointer;
+    Gen: TUInt64;
+  end;
+var
+  GLive:      array of TLiveAlloc;
+  GLiveCount: TInt32 = 0;
+  GNextGen:   TUInt64 = 0;
+
+function LiveIndex(P: Pointer; G: TUInt64): TInt32;
+var
+  I: TInt32;
+begin
+  for I := 0 to GLiveCount - 1 do
+    if (GLive[I].Ptr = P) and (GLive[I].Gen = G) then
+    begin
+      Result := I;
+      Exit;
+    end;
+  Result := -1;
+end;
+
+procedure LiveAdd(P: Pointer; G: TUInt64);
+begin
+  if GLiveCount >= Length(GLive) then
+    SetLength(GLive, 2 * GLiveCount + 8);
+  GLive[GLiveCount].Ptr := P;
+  GLive[GLiveCount].Gen := G;
+  Inc(GLiveCount);
+end;
+
+procedure LiveRemove(Idx: TInt32);
+begin
+  Dec(GLiveCount);
+  GLive[Idx] := GLive[GLiveCount];
+end;
+
+function MemIsLive(const Mem: TDeviceMemory): Boolean;
+begin
+  Result := Mem.IsValid and (Mem.Ptr <> nil) and (LiveIndex(Mem.Ptr, Mem.Generation) >= 0);
+end;
+
 { ============================================================
   === BLOCK 105: TSimulatedDeviceBackend.Initialize
   ============================================================ }
@@ -918,6 +888,7 @@ begin
   FInitialized             := False;
   FAllocatedBytes          := 0;
   FAllocCount              := 0;
+  FPending                 := False;
   FProperties.DeviceID     := ADeviceID;
   FProperties.Name         := '';
   FProperties.TotalMemory  := 0;
@@ -979,6 +950,7 @@ begin
   Mem.Kind     := mkDevice;
   Mem.DeviceID := FProperties.DeviceID;
   Mem.IsValid  := False;
+  Mem.Generation := 0;
 
   if not FInitialized then
   begin
@@ -1009,6 +981,9 @@ begin
   Mem.Kind     := mkDevice;
   Mem.DeviceID := FProperties.DeviceID;
   Mem.IsValid  := True;
+  Inc(GNextGen);
+  Mem.Generation := GNextGen;   { FIX-4 }
+  LiveAdd(P, GNextGen);
 
   Inc(FAllocatedBytes, Bytes);
   Inc(FAllocCount);
@@ -1037,12 +1012,13 @@ begin
     Result := PGPU_ERR_NOT_INITIALIZED;
     Exit;
   end;
-  if (not Mem.IsValid) or (Mem.Ptr = nil) then
+  if not MemIsLive(Mem) then  { FIX-4: stale copies rejected }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
   end;
 
+  LiveRemove(LiveIndex(Mem.Ptr, Mem.Generation));
   System.FreeMem(Mem.Ptr);
 
   if FAllocatedBytes >= Mem.Bytes then
@@ -1054,6 +1030,7 @@ begin
   Mem.Ptr     := nil;
   Mem.Bytes   := 0;
   Mem.IsValid := False;
+  Mem.Generation := 0;
   Result      := PGPU_SUCCESS;
 end;
 
@@ -1075,7 +1052,7 @@ begin
     Result := PGPU_ERR_NOT_INITIALIZED;
     Exit;
   end;
-  if (Src = nil) or (not Dst.IsValid) or (Dst.Ptr = nil) then
+  if (Src = nil) or not MemIsLive(Dst) then  { FIX-4 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -1087,6 +1064,7 @@ begin
   end;
 
   System.Move(Src^, Dst.Ptr^, SizeInt(Bytes));
+  FPending := True;  { FIX-5 }
   Result := PGPU_SUCCESS;
 end;
 
@@ -1108,7 +1086,7 @@ begin
     Result := PGPU_ERR_NOT_INITIALIZED;
     Exit;
   end;
-  if (not Src.IsValid) or (Src.Ptr = nil) or (Dst = nil) then
+  if (not MemIsLive(Src)) or (Dst = nil) then  { FIX-4 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -1119,6 +1097,13 @@ begin
     Exit;
   end;
 
+  { FIX-5 fence: a D2H read never observes unfenced writes. If any H2D/D2D
+    write is pending, Synchronize is called implicitly before the copy. }
+  if FPending then
+  begin
+    Result := Synchronize;
+    if Result <> PGPU_SUCCESS then Exit;
+  end;
   System.Move(Src.Ptr^, Dst^, SizeInt(Bytes));
   Result := PGPU_SUCCESS;
 end;
@@ -1141,8 +1126,7 @@ begin
     Result := PGPU_ERR_NOT_INITIALIZED;
     Exit;
   end;
-  if (not Src.IsValid) or (Src.Ptr = nil)
-  or (not Dst.IsValid) or (Dst.Ptr = nil) then
+  if (not MemIsLive(Src)) or (not MemIsLive(Dst)) then  { FIX-4 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
@@ -1154,6 +1138,7 @@ begin
   end;
 
   System.Move(Src.Ptr^, Dst.Ptr^, SizeInt(Bytes));
+  FPending := True;  { FIX-5 }
   Result := PGPU_SUCCESS;
 end;
 
@@ -1175,6 +1160,7 @@ begin
     Exit;
   end;
   { Simulation is fully synchronous; no deferred work exists to drain. }
+  FPending := False;  { FIX-5: fence drains pending writes }
   Result := PGPU_SUCCESS;
 end;
 
@@ -1446,6 +1432,7 @@ begin
   Mem.Kind     := mkDevice;
   Mem.DeviceID := Device.ID;
   Mem.IsValid  := False;
+  Mem.Generation := 0;
 
   if not Device.IsValid then
   begin
@@ -1486,6 +1473,7 @@ end;
 function DeviceFreeMemory(var Device: TDevice; var Mem: TDeviceMemory): TResult;
 var
   R: TResult;
+  FreedBytes: TSizeT;
 begin
   if not Device.IsValid then
   begin
@@ -1503,13 +1491,17 @@ begin
     Exit;
   end;
 
-  if Device.MemoryTracker.AllocatedBytes >= Mem.Bytes then
-    Dec(Device.MemoryTracker.AllocatedBytes, Mem.Bytes);
-  if Device.MemoryTracker.AllocCount > 0 then
-    Dec(Device.MemoryTracker.AllocCount);
-  Inc(Device.MemoryTracker.TotalFreeCount);
-
+  { FIX-4: free first; account only if the backend actually released it }
+  FreedBytes := Mem.Bytes;
   R      := Device.Backend.FreeMemory(Mem);
+  if R = PGPU_SUCCESS then
+  begin
+    if Device.MemoryTracker.AllocatedBytes >= FreedBytes then
+      Dec(Device.MemoryTracker.AllocatedBytes, FreedBytes);
+    if Device.MemoryTracker.AllocCount > 0 then
+      Dec(Device.MemoryTracker.AllocCount);
+    Inc(Device.MemoryTracker.TotalFreeCount);
+  end;
   Result := R;
 end;
 
@@ -2318,7 +2310,7 @@ begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;
   end;
-  if (not Mem.IsValid) or (Mem.Ptr = nil) then
+  if not MemIsLive(Mem) then  { FIX-4 }
   begin
     Result := PGPU_ERR_INVALID_PARAM;
     Exit;

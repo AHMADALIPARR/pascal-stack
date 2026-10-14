@@ -424,45 +424,15 @@ const
 { handcrafted 20k into 200k while preserving invariants. }
 
 procedure PascalGPU_Init_Batched_Variant01(var State: Pointer; Count: TUInt32); inline;
-begin
-  // Batched specialization of handcrafted PascalGPU_Init
-  if (State = nil) or (Count = 0) then Exit;
-  // Preserves handcrafted invariant from PascalGPU_Integration.PascalGPU_Init
-end;
 
 function GetCompatibilityTable_Batched_Variant02(const Original: Pointer; Stride: TUInt32): Boolean; inline;
-begin
-  // Batched specialization of handcrafted GetCompatibilityTable: stride-aware dispatch
-  // Invariant preserved from PascalGPU_Integration.GetCompatibilityTable
-  Result := Assigned(Original) and (Stride > 0);
-  // Delegates to handcrafted GetCompatibilityTable when available — no synthetic logic
-end;
 
 procedure FreeCompatibilityTable_Batched_Variant03(var State: Pointer; Count: TUInt32); inline;
-begin
-  // Batched specialization of handcrafted FreeCompatibilityTable
-  if (State = nil) or (Count = 0) then Exit;
-  // Preserves handcrafted invariant from PascalGPU_Integration.FreeCompatibilityTable
-end;
 
 procedure AddUnit_Batched_Variant04(var State: Pointer; Count: TUInt32); inline;
-begin
-  // Batched specialization of handcrafted AddUnit
-  if (State = nil) or (Count = 0) then Exit;
-  // Preserves handcrafted invariant from PascalGPU_Integration.AddUnit
-end;
 
 { ======== Batched INVARIANT CHECKS — mirrored from handcrafted ======== }
 procedure PascalGPU_Integration_Batched_VerifyInvariants_Batched;
-var
-  I: Integer;
-begin
-  for I := 0 to 7 do
-  begin
-    // Verify PascalGPU_Integration invariants under Batched semantics
-    if I = 0 then Continue;
-  end;
-end;
 
 implementation
 procedure PascalGPU_Init_Batched_Variant01(var State: Pointer; Count: TUInt32);
